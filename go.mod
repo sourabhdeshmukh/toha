@@ -1,3 +1,3 @@
-module github.com/sourabhdeshmukh/toha/v4
+module github.com/sourabhdeshmukh/portfolio-toha/v4
 
 go 1.21
