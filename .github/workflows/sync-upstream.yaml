@@ -1,0 +1,76 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # Runs every day at midnight UTC (Adjust as needed)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allows you to trigger the workflow manually
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches all history so we can compare branches properly
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for Upstream Changes
+        id: check_changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Get the upstream repository URL using the GitHub CLI
+          UPSTREAM_URL=$(gh repo view --json parent -q '.parent.url')
+          echo "Upstream repository found: $UPSTREAM_URL"
+          
+          # 2. Add upstream remote and fetch its changes
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream
+
+          # 3. Get the default branch name of upstream (usually main or master)
+          UPSTREAM_DEFAULT_BRANCH=$(gh repo view "$UPSTREAM_URL" --json defaultBranchRef -q '.defaultBranchRef.name')
+          echo "Upstream default branch: $UPSTREAM_DEFAULT_BRANCH"
+
+          # 4. Check if there are new commits in upstream compared to local main
+          # Change 'main' if your fork's default branch is named 'master'
+          LOCAL_BRANCH="main" 
+          
+          if git log HEAD..upstream/$UPSTREAM_DEFAULT_BRANCH --oneline | grep -q .; then
+            echo "Updates found upstream."
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+            echo "upstream_branch=$UPSTREAM_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
+          else
+            echo "Fork is already up-to-date with upstream."
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR for Upstream Updates
+        if: steps.check_changes.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_BRANCH: ${{ steps.check_changes.outputs.upstream_branch }}
+        run: |
+          SYNC_BRANCH="sync-upstream-${{ github.run_id }}"
+          
+          # Create a new branch from upstream's latest changes
+          git checkout -b "$SYNC_BRANCH" upstream/$UPSTREAM_BRANCH
+          
+          # Push the new branch to your fork
+          git push origin "$SYNC_BRANCH"
+          
+          # Create the Pull Request using GitHub CLI
+          gh pr create \
+            --title "🔄 Sync upstream changes (${{ env.UPSTREAM_BRANCH }})" \
+            --body "This automated PR syncs your fork with the latest updates from the upstream repository." \
+            --base main \
+            --head "$SYNC_BRANCH"
