@@ -1,76 +1,77 @@
-name: Sync Upstream
+name: Sync Upstream to Fork
 
 on:
   schedule:
     # Runs every day at midnight UTC (Adjust as needed)
     - cron: '0 0 * * *'
-  workflow_dispatch: # Allows you to trigger the workflow manually
-
-permissions:
-  contents: write
-  pull-requests: write
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # Step 1: Check out your forked repository
       - name: Checkout Fork
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Fetches all history so we can compare branches properly
+          fetch-depth: 0 # Fetch all history so we can merge properly
 
+      # Step 2: Set up Git identity
       - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check for Upstream Changes
-        id: check_changes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Step 3: Add the upstream repository and fetch its changes
+      - name: Fetch Upstream
         run: |
-          # 1. Get the upstream repository URL using the GitHub CLI
-          UPSTREAM_URL=$(gh repo view --json parent -q '.parent.url')
-          echo "Upstream repository found: $UPSTREAM_URL"
-          
-          # 2. Add upstream remote and fetch its changes
-          git remote add upstream "$UPSTREAM_URL"
-          git fetch upstream
+          # CHANGE THESE VARIABLES TO MATCH YOUR REPOS
+          UPSTREAM_REPO="https://github.com/hugo-themes/toha.git"
+          UPSTREAM_BRANCH="main" 
+          FORK_BRANCH="main"
+          SYNC_BRANCH="sync-upstream-changes"
 
-          # 3. Get the default branch name of upstream (usually main or master)
-          UPSTREAM_DEFAULT_BRANCH=$(gh repo view "$UPSTREAM_URL" --json defaultBranchRef -q '.defaultBranchRef.name')
-          echo "Upstream default branch: $UPSTREAM_DEFAULT_BRANCH"
+          echo "Adding upstream remote..."
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream "$UPSTREAM_BRANCH"
 
-          # 4. Check if there are new commits in upstream compared to local main
-          # Change 'main' if your fork's default branch is named 'master'
-          LOCAL_BRANCH="main" 
-          
-          if git log HEAD..upstream/$UPSTREAM_DEFAULT_BRANCH --oneline | grep -q .; then
-            echo "Updates found upstream."
-            echo "has_updates=true" >> $GITHUB_OUTPUT
-            echo "upstream_branch=$UPSTREAM_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
-          else
-            echo "Fork is already up-to-date with upstream."
-            echo "has_updates=false" >> $GITHUB_OUTPUT
+          # Check if there are actually any new changes to sync
+          if git diff --quiet "HEAD..upstream/$UPSTREAM_BRANCH"; then
+            echo "No new changes found. Exiting smoothly."
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+            exit 0
           fi
 
-      - name: Create PR for Upstream Updates
-        if: steps.check_changes.outputs.has_updates == 'true'
+          echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          
+          # Create a new branch for the PR based on upstream changes
+          git checkout -b "$SYNC_BRANCH"
+          git merge "upstream/$UPSTREAM_BRANCH" --allow-unrelated-histories -m "Merge upstream changes"
+          
+          # Push the sync branch to your fork
+          git push origin "$SYNC_BRANCH" --force
+          
+          # Pass variables to the next step
+          echo "UPSTREAM_BRANCH=$UPSTREAM_BRANCH" >> $GITHUB_ENV
+          echo "FORK_BRANCH=$FORK_BRANCH" >> $GITHUB_ENV
+          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_ENV
+
+      # Step 4: Create the Pull Request if changes exist
+      - name: Create Pull Request
+        if: env.HAS_CHANGES == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_BRANCH: ${{ steps.check_changes.outputs.upstream_branch }}
         run: |
-          SYNC_BRANCH="sync-upstream-${{ github.run_id }}"
+          # Check if a PR already exists for this branch to avoid duplicates
+          PR_EXISTS=$(gh pr list --head "$SYNC_BRANCH" --base "$FORK_BRANCH" --json number --jq '.[0].number')
           
-          # Create a new branch from upstream's latest changes
-          git checkout -b "$SYNC_BRANCH" upstream/$UPSTREAM_BRANCH
-          
-          # Push the new branch to your fork
-          git push origin "$SYNC_BRANCH"
-          
-          # Create the Pull Request using GitHub CLI
-          gh pr create \
-            --title "🔄 Sync upstream changes (${{ env.UPSTREAM_BRANCH }})" \
-            --body "This automated PR syncs your fork with the latest updates from the upstream repository." \
-            --base main \
-            --head "$SYNC_BRANCH"
+          if [ -z "$PR_EXISTS" ]; then
+            echo "Creating a new Pull Request..."
+            gh pr create \
+              --title "🔄 Sync upstream changes" \
+              --body "This is an automated PR to sync the latest changes from the upstream repository." \
+              --base "$FORK_BRANCH" \
+              --head "$SYNC_BRANCH"
+          else
+            echo "Pull Request already exists (#$PR_EXISTS). Skipping creation."
+          fi
